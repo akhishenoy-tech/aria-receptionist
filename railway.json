@@ -4,7 +4,7 @@
         "builder": "NIXPACKS"
     },
     "deploy": {
-        "startCommand": "python3 scripts/voiceBot.py",
+        "startCommand": "python3 voiceBot.py",
         "cronSchedule": "0 13 * * 1-5",
         "restartPolicyType": "ON_FAILURE",
         "restartPolicyMaxRetries": 3
