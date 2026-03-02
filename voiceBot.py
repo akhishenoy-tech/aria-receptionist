@@ -105,8 +105,8 @@ def mark_lead_as_called(lead_id: str):
     if not res.ok:
         print(f"⚠️ Failed to mark lead {lead_id} as called: {res.text}")
 
-def trigger_outbound_call(lead: dict) -> str:
-    """Sends the lead data to Make.com or the Voice AI platform to initiate the call."""
+def trigger_outbound_call(lead: dict, max_retries: int = 3) -> str:
+    """Sends the lead data to Make.com or the Voice AI platform to initiate the call with retries for queue issues."""
     now_est = datetime.now(timezone.utc) + timedelta(hours=-5)
     current_date_str = now_est.strftime("%Y-%m-%d %I:%M %p EST")
     
@@ -120,21 +120,38 @@ def trigger_outbound_call(lead: dict) -> str:
         "current_date": current_date_str
     }
     
-    print(f"📞 Dispatching Call to: {lead.get('company_name')} [{lead.get('contact_info')}]")
-    try:
-        res = requests.post(VOICE_AI_WEBHOOK_URL, json=payload)
-        if res.ok:
-            print("✅ Call initiated successfully.")
-            # We return the call_id so the script can monitor it
-            try:
-                return res.json().get("call_id")
-            except:
-                # If Make doesn't return JSON yet, we return a placeholder
-                return "queued_via_make"
-        else:
-            print(f"❌ Failed to initiate call: {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"❌ Error triggering call: {e}")
+    retry_count = 0
+    base_delay = 5 # Start with 5s delay on first queue-full error
+    
+    while retry_count <= max_retries:
+        print(f"📞 Dispatching Call to: {lead.get('company_name')} [{lead.get('contact_info')}] (Attempt {retry_count + 1})")
+        try:
+            res = requests.post(VOICE_AI_WEBHOOK_URL, json=payload)
+            if res.ok:
+                print("✅ Call initiated successfully.")
+                try:
+                    return res.json().get("call_id")
+                except:
+                    return "queued_via_make"
+            
+            # Handle "Queue is full" specifically
+            if res.status_code == 400 and "Queue is full" in res.text:
+                if retry_count < max_retries:
+                    wait_time = base_delay * (2 ** retry_count) + random.uniform(0, 5)
+                    print(f"⚠️ Queue full. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    print(f"❌ Failed to initiate call after {max_retries} retries: Queue remains full.")
+            else:
+                print(f"❌ Failed to initiate call: {res.status_code} - {res.text}")
+                break # Don't retry other errors
+                
+        except Exception as e:
+            print(f"❌ Error triggering call: {e}")
+            break
+            
     return None
 
 def main():
@@ -146,6 +163,10 @@ def main():
     if not args.force and not is_est_business_hours():
         print("⏸️  Bot Paused: Current time is outside the 8 AM - 5 PM EST Mon-Fri window.")
         return
+
+    if not RETELL_API_KEY:
+        print("⚠️  WARNING: RETELL_API_KEY is not set. Concurrency limits will NOT be enforced.")
+        print("   Please check your .env file in the 'Ai Receptionsts' directory.")
 
     print("🚀 Running Voice Agent Dispatcher for EST Leads...")
     leads = fetch_uncalled_leads(limit=1200)
@@ -185,7 +206,9 @@ def main():
                 mark_lead_as_called(lead.get("id"))
             
             # Pacing delay between starts to prevent flooding
-            time.sleep(3)
+            # Improved pacing: 5-10s random delay
+            pacing_delay = random.uniform(5, 10)
+            time.sleep(pacing_delay)
 
 if __name__ == "__main__":
     main()
