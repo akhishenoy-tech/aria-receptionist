@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import os
 import re
+import time
 import requests
 import argparse
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,8 +48,8 @@ def is_est_business_hours() -> bool:
         return False
         
     current_time = now_est.time()
-    start_time = time(8, 0)
-    end_time = time(17, 0)
+    start_time = dt_time(8, 0)
+    end_time = dt_time(17, 0)
     
     return start_time <= current_time <= end_time
 
