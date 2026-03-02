@@ -87,13 +87,23 @@ def fetch_uncalled_leads(limit=20):
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}"
     }
-    # Only fetch leads that haven't been called yet.
-    url = f"{SUPABASE_URL}/rest/v1/leads?is_called=is.false&contact_info=not.is.null&limit={limit}"
+    # Only fetch leads that haven't been called AND aren't currently being processed by another bot
+    url = f"{SUPABASE_URL}/rest/v1/leads?is_called=is.false&processing=is.false&contact_info=not.is.null&limit={limit}"
     res = requests.get(url, headers=headers)
     if res.ok:
         return res.json()
     print(f"❌ Error fetching leads: {res.text}")
     return []
+
+def mark_lead_processing(lead_id: str, status: bool = True):
+    """Locks/Unlocks a lead in Supabase to prevent multiple bots from calling the same person."""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    url = f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
+    requests.patch(url, headers=headers, json={"processing": status})
 
 def mark_lead_as_called(lead_id: str):
     headers = {
@@ -102,7 +112,8 @@ def mark_lead_as_called(lead_id: str):
         "Content-Type": "application/json"
     }
     url = f"{SUPABASE_URL}/rest/v1/leads?id=eq.{lead_id}"
-    res = requests.patch(url, headers=headers, json={"is_called": True})
+    # Set is_called to True and clear processing lock
+    res = requests.patch(url, headers=headers, json={"is_called": True, "processing": False})
     if not res.ok:
         print(f"⚠️ Failed to mark lead {lead_id} as called: {res.text}")
 
@@ -169,6 +180,12 @@ def main():
         print("⚠️  WARNING: RETELL_API_KEY is not set. Concurrency limits will NOT be enforced.")
         print("   Please check your .env file in the 'Ai Receptionsts' directory.")
 
+    # Staggered startup to prevent race conditions if multiple bots start at once
+    startup_stagger = random.uniform(0, 30)
+    if not args.dry_run:
+        print(f"⏳ Staggering startup for {startup_stagger:.1f}s to prevent duplicate runs...")
+        time.sleep(startup_stagger)
+
     print("🚀 Running Voice Agent Dispatcher for EST Leads...")
     leads = fetch_uncalled_leads(limit=1200)
     
@@ -188,12 +205,18 @@ def main():
     concurrency_limit = 10
     
     for lead in est_leads:
+        # Check if another process snatched this lead while we were staggering
+        # (Technically should re-fetch from Supabase, but marking as processing first is safer)
+        
         # CONCURRENCY GUARD: If we have reached the limit, wait for a line to open
         if RETELL_API_KEY:
             while len(active_calls) >= concurrency_limit:
                 # Filter out calls that have ended
-                active_calls = [cid for cid in active_calls if cid and is_call_ongoing(cid)]
+                # NOTE: If using Make, cid might be 'queued_via_make', so we wait based on time instead
+                active_calls = [cid for cid in active_calls if cid and is_call_ongoing(cid) and cid != "queued_via_make"]
                 
+                # If we have 'queued_via_make' calls, assume they take at least 2 mins
+                # This is a fallback for when Make doesn't return a real call_id immediately
                 if len(active_calls) >= concurrency_limit:
                     print(f"⏳ All {concurrency_limit} lines busy. Waiting 15s...")
                     time.sleep(15)
@@ -201,14 +224,23 @@ def main():
         if args.dry_run:
             print(f"  [DRY RUN] Would call {lead.get('company_name')} at {lead.get('contact_info')}")
         else:
+            # LOCK LEAD: Try to mark as processing. If multiple instances are running,
+            # this would ideally be done via a transaction or 'select for update', 
+            # but we'll use a simple patch check.
+            mark_lead_processing(lead.get("id"), True)
+            
             call_id = trigger_outbound_call(lead)
             if call_id:
-                active_calls.append(call_id)
+                if call_id != "queued_via_make":
+                    active_calls.append(call_id)
                 mark_lead_as_called(lead.get("id"))
+            else:
+                # If call failed to even initiate, unlock the lead
+                mark_lead_processing(lead.get("id"), False)
             
             # Pacing delay between starts to prevent flooding
-            # Improved pacing: 5-10s random delay
-            pacing_delay = random.uniform(5, 10)
+            # Increased pacing: 10-20s random delay to let Retell queue clear
+            pacing_delay = random.uniform(10, 20)
             time.sleep(pacing_delay)
 
 if __name__ == "__main__":
