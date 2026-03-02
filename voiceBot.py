@@ -11,10 +11,28 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 
 # Replace this with the URL to trigger the outbound call
 # E.g., a Make.com Webhook URL or the Bland/Retell/Vapi API endpoint
 VOICE_AI_WEBHOOK_URL = os.getenv("VOICE_AI_WEBHOOK_URL", "https://hook.us2.make.com/2ktodpcug2qjy8tcrer2lcyolnjjo6rs")
+
+def is_call_ongoing(call_id: str) -> bool:
+    """Checks if a Retell call is still active/ongoing."""
+    if not RETELL_API_KEY or not call_id:
+        return False
+    
+    url = f"https://api.retellai.com/v2/get-call/{call_id}"
+    headers = {"Authorization": f"Bearer {RETELL_API_KEY}"}
+    
+    try:
+        res = requests.get(url, headers=headers)
+        if res.ok:
+            data = res.json()
+            return data.get("call_status") in ["ringing", "in_progress", "registered"]
+    except:
+        pass
+    return False
 
 # EST Area Codes Mapping (High population states)
 EST_AREA_CODES = {
@@ -87,10 +105,9 @@ def mark_lead_as_called(lead_id: str):
     if not res.ok:
         print(f"⚠️ Failed to mark lead {lead_id} as called: {res.text}")
 
-def trigger_outbound_call(lead: dict):
+def trigger_outbound_call(lead: dict) -> str:
     """Sends the lead data to Make.com or the Voice AI platform to initiate the call."""
     now_est = datetime.now(timezone.utc) + timedelta(hours=-5)
-    # Use a more explicit ISO-like format for easier parsing by downstream tools
     current_date_str = now_est.strftime("%Y-%m-%d %I:%M %p EST")
     
     payload = {
@@ -103,17 +120,22 @@ def trigger_outbound_call(lead: dict):
         "current_date": current_date_str
     }
     
-    # Uncomment and replace with actual API request to the dialer
     print(f"📞 Dispatching Call to: {lead.get('company_name')} [{lead.get('contact_info')}]")
     try:
         res = requests.post(VOICE_AI_WEBHOOK_URL, json=payload)
         if res.ok:
             print("✅ Call initiated successfully.")
-            mark_lead_as_called(lead.get("id"))
+            # We return the call_id so the script can monitor it
+            try:
+                return res.json().get("call_id")
+            except:
+                # If Make doesn't return JSON yet, we return a placeholder
+                return "queued_via_make"
         else:
             print(f"❌ Failed to initiate call: {res.status_code} - {res.text}")
     except Exception as e:
         print(f"❌ Error triggering call: {e}")
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="EST Voice Caller Bot")
@@ -140,12 +162,29 @@ def main():
         
     print(f"🎯 Found {len(est_leads)} eligible EST leads to call.")
     
+    active_calls = []
+    concurrency_limit = 10
+    
     for lead in est_leads:
+        # CONCURRENCY GUARD: If we have reached the limit, wait for a line to open
+        if RETELL_API_KEY:
+            while len(active_calls) >= concurrency_limit:
+                # Filter out calls that have ended
+                active_calls = [cid for cid in active_calls if cid and is_call_ongoing(cid)]
+                
+                if len(active_calls) >= concurrency_limit:
+                    print(f"⏳ All {concurrency_limit} lines busy. Waiting 15s...")
+                    time.sleep(15)
+        
         if args.dry_run:
             print(f"  [DRY RUN] Would call {lead.get('company_name')} at {lead.get('contact_info')}")
         else:
-            trigger_outbound_call(lead)
-            # Add a delay between calls to prevent "Queue is full" errors in Make.com
+            call_id = trigger_outbound_call(lead)
+            if call_id:
+                active_calls.append(call_id)
+                mark_lead_as_called(lead.get("id"))
+            
+            # Pacing delay between starts to prevent flooding
             time.sleep(3)
 
 if __name__ == "__main__":
