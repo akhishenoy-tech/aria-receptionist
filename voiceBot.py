@@ -14,9 +14,11 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
 
-# Replace this with the URL to trigger the outbound call
-# E.g., a Make.com Webhook URL or the Bland/Retell/Vapi API endpoint
-VOICE_AI_WEBHOOK_URL = os.getenv("VOICE_AI_WEBHOOK_URL", "https://hook.us2.make.com/2ktodpcug2qjy8tcrer2lcyolnjjo6rs")
+LOCK_FILE = "/tmp/voicebot.lock"
+
+def cleanup():
+    if os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
 
 def is_call_ongoing(call_id: str) -> bool:
     """Checks if a Retell call is still active/ongoing."""
@@ -176,72 +178,79 @@ def main():
         print("⏸️  Bot Paused: Current time is outside the 8 AM - 5 PM EST Mon-Fri window.")
         return
 
-    if not RETELL_API_KEY:
-        print("⚠️  WARNING: RETELL_API_KEY is not set. Concurrency limits will NOT be enforced.")
-        print("   Please check your .env file in the 'Ai Receptionsts' directory.")
-
-    # Staggered startup to prevent race conditions if multiple bots start at once
-    startup_stagger = random.uniform(0, 30)
-    if not args.dry_run:
-        print(f"⏳ Staggering startup for {startup_stagger:.1f}s to prevent duplicate runs...")
-        time.sleep(startup_stagger)
-
-    print("🚀 Running Voice Agent Dispatcher for EST Leads...")
-    leads = fetch_uncalled_leads(limit=1200)
-    
-    est_leads = []
-    for lead in leads:
-        ac = extract_area_code(lead.get("contact_info", ""))
-        if ac in EST_AREA_CODES:
-            est_leads.append(lead)
-            
-    if not est_leads:
-        print("📭 No uncalled EST leads found in this batch.")
+    # --- SINGLE INSTANCE LOCK ---
+    if os.path.exists(LOCK_FILE):
+        # Check if the process is actually running (stale lock check)
+        print("⚠️  Another instance of the bot is already running or a stale lock exists.")
+        print("   If you are SURE no other bot is running, delete /tmp/voicebot.lock")
         return
-        
-    print(f"🎯 Found {len(est_leads)} eligible EST leads to call.")
     
-    active_calls = []
-    concurrency_limit = 10
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
     
-    for lead in est_leads:
-        # Check if another process snatched this lead while we were staggering
-        # (Technically should re-fetch from Supabase, but marking as processing first is safer)
+    try:
+        if not RETELL_API_KEY:
+            print("⚠️  WARNING: RETELL_API_KEY is not set. Concurrency limits will NOT be enforced.")
+            print("   Please check your .env file in the 'Ai Receptionsts' directory.")
+
+        # Staggered startup to prevent race conditions if multiple bots start at once
+        startup_stagger = random.uniform(2, 15)
+        if not args.dry_run:
+            print(f"⏳ Staggering startup for {startup_stagger:.1f}s to prevent duplicate runs...")
+            time.sleep(startup_stagger)
+
+        print("🚀 Running Voice Agent Dispatcher for EST Leads...")
+        leads = fetch_uncalled_leads(limit=1200)
         
-        # CONCURRENCY GUARD: If we have reached the limit, wait for a line to open
-        if RETELL_API_KEY:
-            while len(active_calls) >= concurrency_limit:
-                # Filter out calls that have ended
-                # NOTE: If using Make, cid might be 'queued_via_make', so we wait based on time instead
-                active_calls = [cid for cid in active_calls if cid and is_call_ongoing(cid) and cid != "queued_via_make"]
+        est_leads = []
+        for lead in leads:
+            ac = extract_area_code(lead.get("contact_info", ""))
+            if ac in EST_AREA_CODES:
+                est_leads.append(lead)
                 
-                # If we have 'queued_via_make' calls, assume they take at least 2 mins
-                # This is a fallback for when Make doesn't return a real call_id immediately
-                if len(active_calls) >= concurrency_limit:
-                    print(f"⏳ All {concurrency_limit} lines busy. Waiting 15s...")
-                    time.sleep(15)
+        if not est_leads:
+            print("📭 No uncalled EST leads found in this batch.")
+            return
+            
+        print(f"🎯 Found {len(est_leads)} eligible EST leads to call.")
         
-        if args.dry_run:
-            print(f"  [DRY RUN] Would call {lead.get('company_name')} at {lead.get('contact_info')}")
-        else:
-            # LOCK LEAD: Try to mark as processing. If multiple instances are running,
-            # this would ideally be done via a transaction or 'select for update', 
-            # but we'll use a simple patch check.
-            mark_lead_processing(lead.get("id"), True)
+        active_calls = []
+        concurrency_limit = 10
+        
+        for lead in est_leads:
+            # Check if another process snatched this lead while we were staggering
+            # (Technically should re-fetch from Supabase, but marking as processing first is safer)
             
-            call_id = trigger_outbound_call(lead)
-            if call_id:
-                if call_id != "queued_via_make":
-                    active_calls.append(call_id)
-                mark_lead_as_called(lead.get("id"))
+            # CONCURRENCY GUARD: If we have reached the limit, wait for a line to open
+            if RETELL_API_KEY:
+                while len(active_calls) >= concurrency_limit:
+                    # Filter out calls that have ended
+                    active_calls = [cid for cid in active_calls if cid and is_call_ongoing(cid) and cid != "queued_via_make"]
+                    
+                    if len(active_calls) >= concurrency_limit:
+                        print(f"⏳ All {concurrency_limit} lines busy. Waiting 15s...")
+                        time.sleep(15)
+            
+            if args.dry_run:
+                print(f"  [DRY RUN] Would call {lead.get('company_name')} at {lead.get('contact_info')}")
             else:
-                # If call failed to even initiate, unlock the lead
-                mark_lead_processing(lead.get("id"), False)
-            
-            # Pacing delay between starts to prevent flooding
-            # Increased pacing: 10-20s random delay to let Retell queue clear
-            pacing_delay = random.uniform(10, 20)
-            time.sleep(pacing_delay)
+                mark_lead_processing(lead.get("id"), True)
+                
+                call_id = trigger_outbound_call(lead)
+                if call_id:
+                    if call_id != "queued_via_make":
+                        active_calls.append(call_id)
+                    mark_lead_as_called(lead.get("id"))
+                else:
+                    mark_lead_processing(lead.get("id"), False)
+                
+                pacing_delay = random.uniform(10, 20)
+                time.sleep(pacing_delay)
+
+    except Exception as e:
+        print(f"💥 Fatal error in main loop: {e}")
+    finally:
+        cleanup()
 
 if __name__ == "__main__":
     main()
