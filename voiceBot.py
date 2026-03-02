@@ -13,7 +13,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 # Replace this with the URL to trigger the outbound call
 # E.g., a Make.com Webhook URL or the Bland/Retell/Vapi API endpoint
-VOICE_AI_WEBHOOK_URL = os.getenv("VOICE_AI_WEBHOOK_URL", "https://hook.us2.make.com/YOUR_CALL_INIT_WEBHOOK_HERE")
+VOICE_AI_WEBHOOK_URL = os.getenv("VOICE_AI_WEBHOOK_URL", "https://hook.us2.make.com/2ktodpcug2qjy8tcrer2lcyolnjjo6rs")
 
 # EST Area Codes Mapping (High population states)
 EST_AREA_CODES = {
@@ -89,7 +89,8 @@ def mark_lead_as_called(lead_id: str):
 def trigger_outbound_call(lead: dict):
     """Sends the lead data to Make.com or the Voice AI platform to initiate the call."""
     now_est = datetime.now(timezone.utc) + timedelta(hours=-5)
-    current_date_str = now_est.strftime("%A, %B %d, %Y, %I:%M %p EST")
+    # Use a more explicit ISO-like format for easier parsing by downstream tools
+    current_date_str = now_est.strftime("%Y-%m-%d %I:%M %p EST")
     
     payload = {
         "lead_id": lead.get("id"),
@@ -143,8 +144,8 @@ def main():
             print(f"  [DRY RUN] Would call {lead.get('company_name')} at {lead.get('contact_info')}")
         else:
             trigger_outbound_call(lead)
-            # Add a delay between calls if needed to prevent rate limits
-            # time.sleep(10)
+            # Add a delay between calls to prevent "Queue is full" errors in Make.com
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
