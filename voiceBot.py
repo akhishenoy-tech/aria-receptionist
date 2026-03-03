@@ -13,6 +13,27 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 RETELL_API_KEY = os.getenv("RETELL_API_KEY")
+VOICE_AI_WEBHOOK_URL = os.getenv("VOICE_AI_WEBHOOK_URL")
+
+def check_env():
+    """Ensures all critical environment variables are set."""
+    missing = []
+    if not SUPABASE_URL: missing.append("SUPABASE_URL")
+    if not SUPABASE_KEY: missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    if not RETELL_API_KEY: missing.append("RETELL_API_KEY")
+    if not VOICE_AI_WEBHOOK_URL: missing.append("VOICE_AI_WEBHOOK_URL")
+    
+    if missing:
+        print(f"❌ CRITICAL ERROR: Missing environment variables: {', '.join(missing)}")
+        print("   Please set these in your Railway dashboard or .env file.")
+        return False
+    
+    if not SUPABASE_URL.startswith("http"):
+        print(f"❌ CRITICAL ERROR: Invalid SUPABASE_URL format: '{SUPABASE_URL}'")
+        print("   It must start with http:// or https://")
+        return False
+        
+    return True
 
 LOCK_FILE = "/tmp/voicebot.lock"
 
@@ -169,6 +190,9 @@ def trigger_outbound_call(lead: dict, max_retries: int = 3) -> str:
     return None
 
 def main():
+    if not check_env():
+        return
+
     parser = argparse.ArgumentParser(description="EST Voice Caller Bot")
     parser.add_argument("--dry-run", action="store_true", help="Print which EST leads would be called without actually calling them.")
     parser.add_argument("--force", action="store_true", help="Bypass the 8-5 EST check (for testing purposes).")
