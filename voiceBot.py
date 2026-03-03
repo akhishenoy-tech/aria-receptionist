@@ -173,12 +173,13 @@ def trigger_outbound_call(lead: dict, max_retries: int = 3) -> str:
             if res.status_code == 400 and "Queue is full" in res.text:
                 if retry_count < max_retries:
                     wait_time = base_delay * (2 ** retry_count) + random.uniform(0, 5)
-                    print(f"⚠️ Queue full. Retrying in {wait_time:.1f}s...")
+                    print(f"⚠️ Queue full. Retrying in {wait_time:.1f}s... (Attempt {retry_count + 1}/{max_retries})")
                     time.sleep(wait_time)
                     retry_count += 1
                     continue
                 else:
-                    print(f"❌ Failed to initiate call after {max_retries} retries: Queue remains full.")
+                    print(f"❌ Failed to initiate call after {max_retries} retries: Queue remains full. Skipping lead.")
+                    break
             else:
                 print(f"❌ Failed to initiate call: {res.status_code} - {res.text}")
                 break # Don't retry other errors
